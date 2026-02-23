@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 PROJECT_ID = "zerocrow22a01"
 API_KEY = "AIzaSyClDD1hKoBCA5MI4AYw_Z0-oGYkI4wwh5c"
 collection0 = "user_requests"                            # Register
-collection1 = "example"                                    # Login
-initialize_file="example.py"                               # Main application file to run after login
+collection1 = "sample"                                    # Login app collection (also need to create firestore rules for this)
+initialize_file="sample.py"                               # Main application file to run after login
 
 # Firestore REST Paths
 def firestore_get_url(collection, doc_id):
@@ -21,34 +21,97 @@ def firestore_set_url(collection, doc_id):
     return f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/{collection}/{doc_id}?key={API_KEY}"
 
 
-# ==================== GET MOTHERBOARD SERIAL (Linux) ====================
+# ==================== GET MOTHERBOARD SERIAL (Linux/Windows) ====================
 def get_motherboard_serial():
+    """Attempt to determine the board serial number on Linux or Windows.
+
+    On Linux we try dmidecode first (requires sudo), then fall back to
+    reading /sys/class/dmi files.  On Windows we first call wmic and then
+    (`powershell`) as a fallback.  Placeholder values and empty strings are
+    ignored to avoid OEM defaults.
+    """
     try:
-        # Method 1: dmidecode
-        try:
-            result = subprocess.check_output(
-                ["sudo", "dmidecode", "-s", "baseboard-serial-number"],
-                text=True
-            ).strip()
-            if result and result.lower() not in ["to be filled by o.e.m.", "none", "o.e.m.", "not specified", "default string"]:
-                return result
-        except:
-            pass
+        if sys.platform.startswith("win"):
+            # ---- Windows path ----
+            # Method 1: wmic utility (most Win10+ have it)
+            try:
+                output = subprocess.check_output(
+                    ["wmic", "baseboard", "get", "serialnumber"],
+                    text=True
+                ).strip().splitlines()
+                if len(output) >= 2:
+                    sn = output[1].strip()
+                    if sn and sn.lower() not in [
+                        "to be filled by o.e.m.",
+                        "none",
+                        "o.e.m.",
+                        "not specified",
+                        "default string",
+                    ]:
+                        return sn
+            except Exception:
+                pass
 
-        # Method 2: Read from sys filesystem
-        paths = [
-            "/sys/class/dmi/id/board_serial",
-            "/sys/class/dmi/id/product_serial",
-            "/sys/class/dmi/id/chassis_serial"
-        ]
-        for path in paths:
-            if os.path.exists(path):
-                with open(path) as f:
-                    serial = f.read().strip()
-                    if serial and serial.lower() not in ["to be filled by o.e.m.", "none", "0", "default string"]:
-                        return serial
+            # Method 2: powershell WMI query as a secondary fallback
+            try:
+                result = subprocess.check_output(
+                    [
+                        "powershell",
+                        "-Command",
+                        "(Get-WmiObject Win32_BaseBoard).SerialNumber",
+                    ],
+                    text=True,
+                ).strip()
+                if result and result.lower() not in [
+                    "to be filled by o.e.m.",
+                    "none",
+                    "o.e.m.",
+                    "not specified",
+                    "default string",
+                ]:
+                    return result
+            except Exception:
+                pass
 
-        return "UNKNOWN_SERIAL"
+            return "UNKNOWN_SERIAL"
+        else:
+            # ---- Linux path ----
+            # Method 1: dmidecode
+            try:
+                result = subprocess.check_output(
+                    ["sudo", "dmidecode", "-s", "baseboard-serial-number"],
+                    text=True,
+                ).strip()
+                if result and result.lower() not in [
+                    "to be filled by o.e.m.",
+                    "none",
+                    "o.e.m.",
+                    "not specified",
+                    "default string",
+                ]:
+                    return result
+            except Exception:
+                pass
+
+            # Method 2: Read from sys filesystem
+            paths = [
+                "/sys/class/dmi/id/board_serial",
+                "/sys/class/dmi/id/product_serial",
+                "/sys/class/dmi/id/chassis_serial",
+            ]
+            for path in paths:
+                if os.path.exists(path):
+                    with open(path) as f:
+                        serial = f.read().strip()
+                        if serial and serial.lower() not in [
+                            "to be filled by o.e.m.",
+                            "none",
+                            "0",
+                            "default string",
+                        ]:
+                            return serial
+
+            return "UNKNOWN_SERIAL"
     except Exception as e:
         print(f"Error reading serial: {e}")
         return "UNKNOWN_SERIAL"
@@ -58,7 +121,10 @@ MOTHERBOARD_SN = get_motherboard_serial()
 
 if MOTHERBOARD_SN == "UNKNOWN_SERIAL":
     print("\nCould not detect motherboard serial number.")
-    print("Run: sudo dmidecode -s baseboard-serial-number")
+    if sys.platform.startswith("win"):
+        print("Try running 'wmic baseboard get serialnumber' or ensure the script is elevated.")
+    else:
+        print("Run: sudo dmidecode -s baseboard-serial-number")
 
 
 # ==================== GUI APP ====================
@@ -134,6 +200,12 @@ class LoginApp(ctk.CTk):
                     f"Device ID: {MOTHERBOARD_SN}\n\n"
                     "You will be activated soon.")
                 self.email_entry.delete(0, "end")
+            elif resp.status_code == 403:
+                messagebox.showerror(
+                    "Firestore Permission Denied",
+                    "Registration write was blocked by Firestore rules for 'user_requests'.\n"
+                    "Update rules to allow this create operation."
+                )
             else:
                 messagebox.showerror("Error", f"Failed to send request:\n{resp.text}")
         except Exception as e:
@@ -147,7 +219,6 @@ class LoginApp(ctk.CTk):
             resp = requests.get(url)
 
             if resp.status_code == 200:
-                messagebox.showinfo("Success", "Access Granted!")
                 self.destroy()
                 self.run_main_app()
 
@@ -157,6 +228,13 @@ class LoginApp(ctk.CTk):
                     f"This device is not activated yet.\n\n"
                     f"Device ID: {MOTHERBOARD_SN}\n\n"
                     "Please use 'Register' tab and wait for approval."
+                )
+            elif resp.status_code == 403:
+                messagebox.showerror(
+                    "Firestore Permission Denied",
+                    f"Login check is blocked by Firestore rules.\n\n"
+                    f"Path: /{collection1}/{MOTHERBOARD_SN}\n"
+                    "Rules must allow read access for this check."
                 )
 
             else:
